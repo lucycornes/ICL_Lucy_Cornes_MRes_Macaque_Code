@@ -22,8 +22,10 @@ cat("Primary predictor: redness_index (standardized)\n\n")
 
 cat("=== STEP 1: LOADING DATASETS ===\n")
 
+write.csv(direct_merge, "redness_data.csv")
+
 # Load facial redness data
-facial_redness <- read_csv("redness_data.csv")
+facial_redness <- read_csv("facial_pigmentation_data.csv")
 cat("Facial redness data:", nrow(facial_redness), "females\n")
 
 # Load male behavior data  
@@ -68,7 +70,7 @@ cat("Standard deviation:", round(sd(facial_redness$redness_index), 3), "\n")
 cat("\n=== STEP 2: CREATING ANALYSIS DATASET ===\n")
 
 # Get mothers with facial redness data
-mothers_with_redness <- unique(facial_redness$Actor)
+mothers_with_redness <- unique(facial_redness$individual_id)
 cat("Mothers with facial redness data:", length(mothers_with_redness), "\n")
 
 # Debug: Check data before joining
@@ -86,7 +88,7 @@ sample_mother_ids <- head(mother_data$MotherID[!is.na(mother_data$SonID)], 5)
 sample_son_ids <- head(mother_data$SonID[!is.na(mother_data$SonID)], 5)
 cat("Sample MotherIDs:", paste(sample_mother_ids, collapse = ", "), "\n")
 cat("Sample SonIDs:", paste(sample_son_ids, collapse = ", "), "\n")
-cat("Sample facial redness Actors:", paste(head(facial_redness$Actor, 5), collapse = ", "), "\n")
+cat("Sample facial redness Actors:", paste(head(facial_redness$individual_id, 5), collapse = ", "), "\n")
 cat("Sample male behavior IDs:", paste(head(male_behavior$ID, 5), collapse = ", "), "\n")
 
 # Create the analysis dataset by linking all three datasets
@@ -98,7 +100,7 @@ cat("After filtering for mothers with redness data:", nrow(step1_data), "rows\n"
 
 cat("\nStep 2: Adding facial redness data...\n")
 step2_data <- step1_data %>%
-  left_join(facial_redness, by = c("MotherID" = "Actor"))
+  left_join(facial_redness, by = c("MotherID" = "individual_id"))
 cat("After adding redness data:", nrow(step2_data), "rows\n")
 cat("Rows with redness_index:", sum(!is.na(step2_data$redness_index)), "\n")
 
@@ -196,19 +198,24 @@ cat("Sons:", length(unique(analysis_dataset$SonID)), "\n")
 # =============================================================================
 
 cat("\n=== STEP 3: APPLYING SCAN THRESHOLD ===\n")
-
 # Apply scan threshold >= 5
 SCAN_THRESHOLD <- 5
-# AFTER applying scan threshold, recalculate proportion_sons
-filtered_dataset <- filtered_dataset %>%
-  select(-sons_in_study, -proportion_sons) %>%  # Remove old calculations
+
+# FILTER the data first, THEN recalculate sons_in_study and proportion_sons
+filtered_dataset <- analysis_dataset %>%
+  filter(Scan_Count >= SCAN_THRESHOLD) %>%  
   group_by(MotherID) %>%
   mutate(
     sons_in_study = n(),                         # Recalculate on filtered data
-    proportion_sons = sons_in_study / first(TotalSons)  # Correct weights
+    proportion_sons = sons_in_study / first(TotalSons)  # Calculate weights
   ) %>%
   ungroup()
 
+cat("✓ Applied scan threshold >=", SCAN_THRESHOLD, "\n")
+cat("✓ Recalculated sons_in_study and proportion_sons on filtered data\n")
+cat("Rows before filtering:", nrow(analysis_dataset), "\n")
+cat("Rows after filtering:", nrow(filtered_dataset), "\n")
+cat("Removed", nrow(analysis_dataset) - nrow(filtered_dataset), "rows with insufficient scans\n")
 cat("After scan threshold >=", SCAN_THRESHOLD, ":\n")
 cat("Sample size:", nrow(filtered_dataset), "mother-son pairs\n")
 cat("Mothers:", length(unique(filtered_dataset$MotherID)), "\n") 
@@ -275,6 +282,7 @@ ssb_hist <- ggplot(filtered_dataset, aes(x = adjusted_SSB)) +
   theme_minimal()
 print(ssb_hist)
 
+
 cat("Model family choice: Tweedie (handles zeros, continuous values, overdispersion)\n")
 
 
@@ -283,30 +291,38 @@ cat("Model family choice: Tweedie (handles zeros, continuous values, overdispers
 # STEP 7: FIT PRIMARY MODEL - MATERNAL REDNESS INDEX → SONS' SSB
 # =============================================================================
 
-cat("\n=== STEP 7: FITTING PRIMARY MODEL ===\n")
-cat("Model: adjusted_SSB ~ redness_index_std + (1|MotherID)\n")
-cat("Family: Tweedie (log link)\n")
-cat("Weights: proportion_sons\n\n")
+# Load facial pigmentation data with dates
+pigmentation_data <- read.csv("facial_pigmentation_data.csv", stringsAsFactors = FALSE)
 
-# Fit the main model
-redness_model <- NULL
+# Create photo_month in pigmentation data
+pigmentation_data$photo_date_parsed <- as.Date(pigmentation_data$photo_date, format = "%d/%m/%Y")
+pigmentation_data$photo_month <- format(pigmentation_data$photo_date_parsed, "%m")
 
+# Add photo_month to your filtered_dataset by merging
+filtered_dataset <- filtered_dataset %>%
+  left_join(pigmentation_data %>% select(individual_id, photo_month), 
+            by = c("MotherID" = "individual_id"))
+
+# Check if it worked
+cat("Added photo_month to filtered_dataset\n")
+cat("Sample photo_month values:", head(filtered_dataset$photo_month), "\n")
+cat("Unique months:", unique(filtered_dataset$photo_month), "\n")
+
+# Now run your model
 tryCatch({
   redness_model <- glmmTMB(
-    adjusted_SSB ~ redness_index_std + (1|MotherID),
+    adjusted_SSB ~ redness_index_std + photo_month + (1|MotherID),
     weights = proportion_sons,
     family = tweedie(),
     data = filtered_dataset
   )
-  cat("✓ Tweedie model fitted successfully\n")
+  
+  cat("✅ Model with photo_month successful!\n")
+  summary(redness_model)
+  
 }, error = function(e) {
-  cat("✗ Model fitting failed:", e$message, "\n")
-  stop("Model fitting failed")
+  cat("Model failed:", e$message, "\n")
 })
-
-# Display model summary
-cat("\n--- MODEL SUMMARY ---\n")
-print(summary(redness_model))
 
 # =============================================================================
 # STEP 8: MODEL DIAGNOSTICS
@@ -613,3 +629,7 @@ cat("\n=== FINAL MODEL SUMMARY ===\n")
 print(summary(redness_model))
 
 cat("\n*** ANALYSIS COMPLETE ***\n")
+
+library(glmmTMB)
+
+
